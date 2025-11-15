@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>EIP-8078: Contract Event Subscription</title>
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
+		<link rel="stylesheet" href="styles.css" />
+	</head>
+	<body>
+		<div class="container">
+			<header>
+				<div class="eip-header">
+					<h1>EIP-8078: Contract Event Subscription</h1>
+					<div class="eip-meta">
+						<div class="meta-grid">
+							<div class="meta-item">
+								<span class="label">Author:</span>
+								<span class="value">Lucas Cullen (@bitcoinbrisbane) &lt;lucas@bitcoinbrisbane.com.au&gt;</span>
+							</div>
+							<div class="meta-item">
+								<span class="label">Status:</span>
+								<span class="value status-draft">Draft</span>
+							</div>
+							<div class="meta-item">
+								<span class="label">Type:</span>
+								<span class="value">Standards Track</span>
+							</div>
+							<div class="meta-item">
+								<span class="label">Category:</span>
+								<span class="value">Core</span>
+							</div>
+							<div class="meta-item">
+								<span class="label">Created:</span>
+								<span class="value">2025-11-15</span>
+							</div>
+							<div class="meta-item">
+								<span class="label">Discussions:</span>
+								<span class="value"><a href="https://ethereum-magicians.org/t/xxxxx">ethereum-magicians.org</a></span>
+							</div>
+						</div>
+					</div>
+				</div>
+			</header>
+
+			<nav class="table-of-contents">
+				<h2>Table of Contents</h2>
+				<ul>
+					<li><a href="#abstract">Abstract</a></li>
+					<li><a href="#motivation">Motivation</a></li>
+					<li><a href="#specification">Specification</a></li>
+					<li><a href="#rationale">Rationale</a></li>
+					<li><a href="#backwards-compatibility">Backwards Compatibility</a></li>
+					<li><a href="#security-considerations">Security Considerations</a></li>
+					<li><a href="#reference-implementation">Reference Implementation</a></li>
+					<li><a href="#test-cases">Test Cases</a></li>
+					<li><a href="#copyright">Copyright</a></li>
+				</ul>
+			</nav>
+
+			<main>
+				<section id="abstract">
+					<h2>Abstract</h2>
+					<p>
+						This EIP introduces a mechanism for smart contracts to subscribe to events emitted by other contracts and automatically execute callback functions when
+						those events occur. Subscriptions are paid for by the subscribing contract, execute with bounded gas, and fail gracefully without blocking the original
+						transaction if gas runs out or execution fails.
+					</p>
+				</section>
+
+				<section id="motivation">
+					<h2>Motivation</h2>
+					<p>
+						Currently, smart contracts cannot natively react to events emitted by other contracts. Developers must rely on off-chain infrastructure (indexers, bots,
+						relayers) to listen for events and trigger subsequent transactions. This creates several problems:
+					</p>
+
+					<div class="problem-list">
+						<div class="problem-item"><strong>Centralization:</strong> Requires trusted off-chain infrastructure</div>
+						<div class="problem-item"><strong>Latency:</strong> Introduces delays between event emission and reaction</div>
+						<div class="problem-item"><strong>Complexity:</strong> Requires maintaining off-chain services and private keys</div>
+						<div class="problem-item"><strong>Cost:</strong> Users must pay for multiple transactions</div>
+						<div class="problem-item"><strong>Atomicity:</strong> Cannot guarantee atomic execution with the original transaction</div>
+					</div>
+
+					<h3>On-chain event subscriptions would enable:</h3>
+					<ul class="benefits-list">
+						<li><strong>Reactive DeFi protocols</strong> (automatic liquidations, rebalancing)</li>
+						<li><strong>Cross-contract coordination</strong> (DAO proposals triggering dependent actions)</li>
+						<li><strong>Decentralized automation</strong> (eliminating relayer centralization)</li>
+						<li><strong>Atomic multi-step protocols</strong> (oracle updates triggering derivative settlements)</li>
+					</ul>
+				</section>
+
+				<section id="specification">
+					<h2>Specification</h2>
+					<p class="rfc-notice">
+						The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this
+						document are to be interpreted as described in RFC 2119 and RFC 8174.
+					</p>
+
+					<h3>Overview</h3>
+					<ol>
+						<li>Contracts declare subscribable events using enhanced event syntax</li>
+						<li>Contracts subscribe to events using a new <code>subscribe</code> keyword</li>
+						<li>When an event is emitted, subscribed callbacks are executed in isolated contexts</li>
+						<li>Each subscription executes with caller-provided gas limits</li>
+						<li>Subscription failures are caught and logged but do not revert the parent transaction</li>
+					</ol>
+
+					<h3>Solidity Language Changes</h3>
+
+					<h4>1. Subscribable Event Declaration</h4>
+					<p>Events can be marked as <code>subscribable</code> to indicate they support on-chain subscriptions:</p>
+
+					<pre><code class="language-solidity">// Basic subscribable event
+event subscribable Transfer(address indexed from, address indexed to, uint256 value);
+
+// Event with subscription gas hint
+event subscribable PriceUpdated(uint256 price) gasHint(100000);</code></pre>
+
+					<p>The <code>gasHint</code> annotation suggests minimum gas needed for reasonable subscription handling.</p>
+
+					<h4>2. Subscription Syntax</h4>
+					<p>Contracts subscribe to events using the <code>subscribe</code> statement in their constructor or a dedicated subscription management function:</p>
+
+					<pre><code class="language-solidity">contract Subscriber {
+    // Subscribe in constructor
+    constructor(address targetContract) {
+        subscribe targetContract.Transfer(from, to, value)
+            with onTransfer(from, to, value)
+            gasLimit 150000
+            gasPrice 20 gwei;
+    }
+
+    // Callback function - MUST be payable to receive gas payment refunds
+    function onTransfer(address from, address to, uint256 value)
+        external
+        payable
+        onlyEventCallback
+    {
+        // Handle the event
+        // If this runs out of gas or reverts, the original Transfer event still succeeds
+    }
+
+    // Unsubscribe
+    function cleanup(address targetContract) external {
+        unsubscribe targetContract.Transfer;
+    }
+}</code></pre>
+
+					<h4>3. Event Callback Modifier</h4>
+					<p>A new modifier <code>onlyEventCallback</code> ensures functions can only be called by the EVM's subscription dispatcher:</p>
+
+					<pre><code class="language-solidity">modifier onlyEventCallback {
+    require(msg.sender == address(0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF), "Only event callbacks");
+    _;
+}</code></pre>
+
+					<p>The special address <code>0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF</code> is reserved for the subscription dispatcher.</p>
+
+					<h4>4. Subscription Management</h4>
+					<pre><code class="language-solidity">// Check if subscribed
+bool isSubscribed = this.isSubscribedTo(targetContract, "Transfer");
+
+// Get subscription details
+(uint256 gasLimit, uint256 gasPrice, address callback) =
+    this.getSubscription(targetContract, "Transfer");
+
+// Update subscription gas parameters
+updateSubscription(targetContract, "Transfer", newGasLimit, newGasPrice);</code></pre>
+
+					<h3>EVM Changes</h3>
+
+					<h4>1. New Opcodes</h4>
+
+					<div class="opcode-section">
+						<h5><strong>SUBSCRIBE (0x5c)</strong></h5>
+						<ul>
+							<li>Stack input: <code>[target_address, event_signature, callback_address, callback_selector, gas_limit, gas_price]</code></li>
+							<li>Stack output: <code>[subscription_id]</code></li>
+							<li>Gas cost: 20,000 + storage costs</li>
+							<li>Creates a subscription record in global subscription storage</li>
+						</ul>
+					</div>
+
+					<div class="opcode-section">
+						<h5><strong>UNSUBSCRIBE (0x5d)</strong></h5>
+						<ul>
+							<li>Stack input: <code>[subscription_id]</code></li>
+							<li>Stack output: <code>[success]</code></li>
+							<li>Gas cost: 5,000 + storage refund</li>
+							<li>Removes subscription and refunds storage</li>
+						</ul>
+					</div>
+
+					<div class="opcode-section">
+						<h5><strong>NOTIFYSUBSCRIBERS (0x5e)</strong></h5>
+						<ul>
+							<li>Stack input: <code>[event_signature, data_offset, data_size]</code></li>
+							<li>Stack output: <code>[num_notified]</code></li>
+							<li>Gas cost: 2,000 + (500 * num_subscribers)</li>
+							<li>Called automatically during LOG operations for subscribable events</li>
+							<li>Schedules callback executions</li>
+						</ul>
+					</div>
+
+					<h4>2. Subscription Storage Model</h4>
+					<p>Subscriptions are stored in a new EVM state trie separate from contract storage:</p>
+
+					<pre><code class="language-javascript">SubscriptionKey = keccak256(target_address, event_signature, subscriber_address)
+SubscriptionValue = RLP([callback_address, callback_selector, gas_limit, gas_price, deposit])</code></pre>
+
+					<h4>3. Event Emission Flow</h4>
+					<p>When a subscribable event is emitted:</p>
+
+					<div class="flow-steps">
+						<div class="step">
+							<span class="step-number">1</span>
+							<span class="step-text">Event is logged normally (LOG0-LOG4 opcodes)</span>
+						</div>
+						<div class="step">
+							<span class="step-number">2</span>
+							<span class="step-text">If event is marked subscribable, NOTIFYSUBSCRIBERS is called</span>
+						</div>
+						<div class="step">
+							<span class="step-number">3</span>
+							<span class="step-text">For each subscription:</span>
+							<ul>
+								<li>Check subscriber has sufficient deposited gas payment</li>
+								<li>Deduct gas payment (gas_limit * gas_price) from deposit</li>
+								<li>Schedule callback execution in isolated context</li>
+								<li>Execute callback with try-catch semantics</li>
+								<li>Refund unused gas to subscriber</li>
+								<li>Log callback success/failure</li>
+							</ul>
+						</div>
+						<div class="step">
+							<span class="step-number">4</span>
+							<span class="step-text">Original transaction continues regardless of callback outcomes</span>
+						</div>
+					</div>
+
+					<h4>4. Callback Execution Context</h4>
+					<p>Callbacks execute in an isolated context:</p>
+
+					<pre><code class="language-javascript">- msg.sender = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF (subscription dispatcher)
+- tx.origin = original tx.origin (preserved from parent)
+- block.* = same as parent transaction
+- Gas limit = subscription gas_limit
+- Reverts/failures are caught and logged but don't propagate
+- State changes are included if callback succeeds
+- DELEGATECALL and CALLCODE are disabled in callbacks</code></pre>
+
+					<h4>5. Gas Accounting</h4>
+					<p>Subscription gas costs are separate from the transaction that emits the event:</p>
+
+					<div class="gas-accounting">
+						<div class="gas-item"><strong>Subscription Deposit:</strong> Subscribers must deposit ETH to cover future callback executions</div>
+						<div class="gas-item"><strong>Per-Callback Deduction:</strong> When event is emitted, <code>gas_limit * gas_price</code> is deducted from deposit</div>
+						<div class="gas-item"><strong>Refunds:</strong> Unused gas is refunded to subscriber's deposit balance</div>
+						<div class="gas-item"><strong>Insufficient Balance:</strong> If deposit insufficient, callback is skipped and event logged</div>
+						<div class="gas-item"><strong>Withdrawal:</strong> Subscribers can withdraw unused deposits</div>
+					</div>
+
+					<h4>6. New Precompile: Subscription Manager (0x0a)</h4>
+					<p><strong>Address:</strong> <code>0x000000000000000000000000000000000000000a</code></p>
+
+					<h5>Functions:</h5>
+					<ul>
+						<li><code>deposit(subscription_id)</code> - Add ETH to subscription deposit</li>
+						<li><code>withdraw(subscription_id, amount)</code> - Withdraw from deposit</li>
+						<li><code>getBalance(subscription_id)</code> - Query deposit balance</li>
+						<li><code>getSubscriptionInfo(subscription_id)</code> - Get subscription details</li>
+					</ul>
+
+					<h3>Compiler Changes (Solidity)</h3>
+
+					<h4>1. Event Declaration Parsing</h4>
+					<p>The Solidity compiler must:</p>
+					<ul>
+						<li>Parse <code>subscribable</code> keyword on event declarations</li>
+						<li>Parse optional <code>gasHint(uint256)</code> annotation</li>
+						<li>Emit metadata indicating event is subscribable</li>
+						<li>Include subscription hints in contract ABI</li>
+					</ul>
+
+					<pre><code class="language-json">{
+  "type": "event",
+  "name": "Transfer",
+  "inputs": [...],
+  "subscribable": true,
+  "gasHint": 100000
+}</code></pre>
+
+					<h4>2. Subscribe Statement Compilation</h4>
+					<p>The <code>subscribe</code> statement compiles to:</p>
+
+					<div class="compilation-steps">
+						<div class="comp-step">1. Load subscription parameters onto stack</div>
+						<div class="comp-step">2. Call SUBSCRIBE opcode</div>
+						<div class="comp-step">3. Store returned subscription_id</div>
+						<div class="comp-step">4. Emit SubscriptionCreated event for off-chain indexing</div>
+					</div>
+
+					<h4>3. Built-in Subscription Functions</h4>
+					<p>The compiler provides built-in functions:</p>
+
+					<pre><code class="language-solidity">// Automatically available in all contracts
+function isSubscribedTo(address target, string memory eventSig) internal view returns (bool);
+function getSubscription(address target, string memory eventSig) internal view returns (...);
+function updateSubscription(address target, string memory eventSig, uint256 gasLimit, uint256 gasPrice) internal;</code></pre>
+
+					<h4>4. Callback Function Validation</h4>
+					<p>The compiler enforces:</p>
+					<ul>
+						<li>Callback functions MUST be <code>external</code></li>
+						<li>Callback functions SHOULD be <code>payable</code> to receive gas refunds</li>
+						<li>Callback functions MUST use <code>onlyEventCallback</code> modifier or equivalent check</li>
+						<li>Parameter types MUST match subscribed event types</li>
+					</ul>
+
+					<h3>Client Implementation (Geth)</h3>
+
+					<h4>1. Subscription State Management</h4>
+					<p>New database schema:</p>
+
+					<pre><code class="language-go">type Subscription struct {
+    ID              common.Hash
+    TargetContract  common.Address
+    EventSignature  common.Hash
+    SubscriberContract common.Address
+    CallbackAddress common.Address
+    CallbackSelector [4]byte
+    GasLimit        uint64
+    GasPrice        *big.Int
+    DepositBalance  *big.Int
+    Active          bool
+}</code></pre>
+
+					<h4>2. EVM Modification</h4>
+					<p>In <code>core/vm/evm.go</code>:</p>
+
+					<pre><code class="language-go">// New field in EVM struct
+type EVM struct {
+    // ... existing fields
+    SubscriptionManager *SubscriptionManager
+    PendingCallbacks    []*CallbackExecution
+}
+
+// Execute callbacks after main execution
+func (evm *EVM) ProcessCallbacks() error {
+    for _, cb := range evm.PendingCallbacks {
+        evm.executeCallback(cb)
+    }
+    return nil
+}
+
+func (evm *EVM) executeCallback(cb *CallbackExecution) {
+    // Create isolated context
+    snapshot := evm.StateDB.Snapshot()
+
+    // Set special msg.sender
+    evm.Context.Origin = cb.OriginalOrigin
+
+    // Execute with try-catch semantics
+    ret, gasUsed, err := evm.Call(
+        AccountRef(SUBSCRIPTION_DISPATCHER_ADDRESS),
+        cb.CallbackAddress,
+        cb.CallbackData,
+        cb.GasLimit,
+        big.NewInt(0),
+    )
+
+    if err != nil {
+        // Revert callback state changes but continue
+        evm.StateDB.RevertToSnapshot(snapshot)
+        // Log callback failure
+        evm.StateDB.AddLog(&types.Log{
+            Address: cb.SubscriberAddress,
+            Topics:  []common.Hash{CallbackFailedEvent, cb.SubscriptionID},
+            Data:    []byte(err.Error()),
+        })
+    } else {
+        // Refund unused gas
+        refund := (cb.GasLimit - gasUsed) * cb.GasPrice
+        evm.SubscriptionManager.RefundGas(cb.SubscriptionID, refund)
+    }
+}</code></pre>
+
+					<h4>3. LOG Opcode Modification</h4>
+					<p>In <code>core/vm/instructions.go</code>:</p>
+
+					<pre><code class="language-go">func opLogN(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+    // ... existing LOG implementation
+
+    // Check if event is subscribable
+    eventSig := scope.Stack.peek().Bytes32()
+    if interpreter.evm.SubscriptionManager.IsSubscribableEvent(scope.Contract.Address(), eventSig) {
+        // Notify subscribers
+        subscribers := interpreter.evm.SubscriptionManager.GetSubscribers(
+            scope.Contract.Address(),
+            eventSig,
+        )
+
+        for _, sub := range subscribers {
+            // Deduct gas from deposit
+            if !sub.DeductGas() {
+                // Insufficient deposit, skip and log
+                interpreter.evm.StateDB.AddLog(insufficientGasLog(sub))
+                continue
+            }
+
+            // Schedule callback
+            callback := &CallbackExecution{
+                SubscriptionID:   sub.ID,
+                SubscriberAddress: sub.SubscriberContract,
+                CallbackAddress:  sub.CallbackAddress,
+                CallbackData:     buildCallbackData(sub, logData),
+                GasLimit:         sub.GasLimit,
+                GasPrice:         sub.GasPrice,
+                OriginalOrigin:   interpreter.evm.Context.Origin,
+            }
+            interpreter.evm.PendingCallbacks = append(
+                interpreter.evm.PendingCallbacks,
+                callback,
+            )
+        }
+    }
+
+    return nil, nil
+}</code></pre>
+
+					<h4>4. State Trie Extension</h4>
+					<p>Add new subscription trie alongside existing state tries:</p>
+
+					<pre><code class="language-go">type StateDB struct {
+    // ... existing fields
+    subscriptionTrie Trie
+    subscriptionCache *lru.Cache
+}</code></pre>
+
+					<h4>5. RPC Extensions</h4>
+					<p>New RPC methods:</p>
+
+					<pre><code class="language-go">// Get all subscriptions for an address
+eth_getSubscriptions(address) -> []Subscription
+
+// Get subscription details
+eth_getSubscription(subscriptionId) -> Subscription
+
+// Get callback execution history
+eth_getCallbackHistory(subscriptionId, fromBlock, toBlock) -> []CallbackLog</code></pre>
+				</section>
+
+				<section id="rationale">
+					<h2>Rationale</h2>
+
+					<h3>Design Decisions</h3>
+
+					<div class="design-decision">
+						<h4>Why isolated execution context?</h4>
+						<p>Prevents subscription callbacks from blocking or reverting the original transaction. The emitting contract should not care about subscriber behavior.</p>
+					</div>
+
+					<div class="design-decision">
+						<h4>Why require payable callbacks?</h4>
+						<p>Enables gas refunds to be returned to the subscribing contract, improving efficiency.</p>
+					</div>
+
+					<div class="design-decision">
+						<h4>Why separate deposit model?</h4>
+						<p>Prevents DoS attacks where subscriptions drain the emitting contract's gas. Subscribers pay for their own execution.</p>
+					</div>
+
+					<div class="design-decision">
+						<h4>Why special dispatcher address?</h4>
+						<p>Provides a secure, verifiable way for callbacks to know they're being called by the subscription system rather than an attacker.</p>
+					</div>
+
+					<div class="design-decision">
+						<h4>Why bounded gas?</h4>
+						<p>Prevents infinite loops or excessive gas consumption from blocking event emission or consuming unreasonable resources.</p>
+					</div>
+
+					<h3>Alternative Approaches Considered</h3>
+
+					<div class="alternative">
+						<h4>1. Event Relayer Precompile</h4>
+						<p>A precompile that stores events and allows polling. <strong>Rejected</strong> because it still requires off-chain infrastructure.</p>
+					</div>
+
+					<div class="alternative">
+						<h4>2. Callback in Same Transaction</h4>
+						<p>Execute callbacks synchronously in the same call frame. <strong>Rejected</strong> because callback failures would revert the emitting transaction.</p>
+					</div>
+
+					<div class="alternative">
+						<h4>3. Deferred Transaction Queue</h4>
+						<p>Store callbacks as pending transactions for future blocks. <strong>Rejected</strong> due to complexity and unpredictable execution timing.</p>
+					</div>
+				</section>
+
+				<section id="backwards-compatibility">
+					<h2>Backwards Compatibility</h2>
+
+					<p>This EIP introduces new opcodes and language features but maintains full backwards compatibility:</p>
+
+					<div class="compatibility-grid">
+						<div class="compat-item">
+							<h4>Existing Contracts</h4>
+							<p>Continue to work without modification</p>
+						</div>
+						<div class="compat-item">
+							<h4>Existing Events</h4>
+							<p>Can be emitted normally; <code>subscribable</code> is opt-in</p>
+						</div>
+						<div class="compat-item">
+							<h4>Non-upgraded Clients</h4>
+							<p>Can process blocks but will skip subscription execution (fork required)</p>
+						</div>
+						<div class="compat-item">
+							<h4>ABI Compatibility</h4>
+							<p>New ABI fields are additive only</p>
+						</div>
+					</div>
+
+					<h3>Hard Fork Required</h3>
+					<p>This EIP requires a coordinated hard fork to activate:</p>
+					<ul>
+						<li>All clients must implement new opcodes</li>
+						<li>Subscription state trie must be initialized</li>
+						<li>Subscription dispatcher precompile must be activated</li>
+					</ul>
+				</section>
+
+				<section id="security-considerations">
+					<h2>Security Considerations</h2>
+
+					<div class="security-section">
+						<h3>1. Reentrancy Protection</h3>
+						<p>
+							Callbacks execute after the main transaction completes, preventing reentrancy attacks on the emitting contract. The isolated context ensures callbacks
+							cannot call back into the emitter within the same transaction.
+						</p>
+					</div>
+
+					<div class="security-section">
+						<h3>2. Gas Griefing</h3>
+						<p><strong>Attack:</strong> Subscribing to popular events with insufficient deposits to waste emitter gas.</p>
+						<p><strong>Mitigation:</strong></p>
+						<ul>
+							<li>Subscription notification cost (500 gas per subscriber) is low</li>
+							<li>Insufficient deposits skip execution rather than failing</li>
+							<li>Emitters can limit subscribable events</li>
+						</ul>
+					</div>
+
+					<div class="security-section">
+						<h3>3. DoS via Excessive Subscriptions</h3>
+						<p><strong>Attack:</strong> Creating millions of subscriptions to slow down event emission.</p>
+						<p><strong>Mitigation:</strong></p>
+						<ul>
+							<li>SUBSCRIBE opcode has high base cost (20,000 gas)</li>
+							<li>NOTIFYSUBSCRIBERS charges per subscriber (500 gas each)</li>
+							<li>Practical limit: ~60,000 gas / 500 = ~120 subscribers per event emission</li>
+							<li>Emitters can choose not to mark events as subscribable</li>
+						</ul>
+					</div>
+
+					<div class="security-section">
+						<h3>4. Front-Running Subscriptions</h3>
+						<p><strong>Attack:</strong> Front-running subscription creation to intercept events meant for others.</p>
+						<p><strong>Mitigation:</strong> Subscriptions are public state; this is expected behavior. Sensitive events should not be subscribable.</p>
+					</div>
+
+					<div class="security-section">
+						<h3>5. Callback Impersonation</h3>
+						<p><strong>Attack:</strong> Calling a callback function directly, bypassing event emission.</p>
+						<p>
+							<strong>Mitigation:</strong> The <code>onlyEventCallback</code> modifier checks for the special dispatcher address, which cannot be impersonated by user
+							transactions.
+						</p>
+					</div>
+
+					<div class="security-section">
+						<h3>6. Deposit Draining</h3>
+						<p><strong>Attack:</strong> Emitting events rapidly to drain subscriber deposits.</p>
+						<p>
+							<strong>Mitigation:</strong> Subscribers control their gas limits and can withdraw deposits. This is similar to users controlling their own transaction
+							gas.
+						</p>
+					</div>
+
+					<div class="security-section">
+						<h3>7. State Inconsistency</h3>
+						<p><strong>Attack:</strong> Callback executes based on stale state if emitter's state changes before callback runs.</p>
+						<p>
+							<strong>Mitigation:</strong> Callbacks execute immediately after the emitting transaction in the same block. State is consistent within the transaction
+							context.
+						</p>
+					</div>
+
+					<div class="security-section">
+						<h3>8. Cross-Contract Reentrancy</h3>
+						<p><strong>Attack:</strong> Callback modifies state that affects other pending callbacks.</p>
+						<p>
+							<strong>Mitigation:</strong> Callbacks are executed sequentially in the order they were subscribed. Each callback sees the cumulative state changes from
+							previous callbacks (similar to transaction ordering).
+						</p>
+					</div>
+				</section>
+
+				<section id="reference-implementation">
+					<h2>Reference Implementation</h2>
+
+					<h3>Solidity Example: Price Oracle with Subscribers</h3>
+
+					<pre><code class="language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract PriceOracle {
+    uint256 public price;
+
+    event subscribable PriceUpdated(uint256 newPrice) gasHint(50000);
+
+    function updatePrice(uint256 _price) external {
+        price = _price;
+        emit PriceUpdated(_price);
+        // Subscribers are automatically notified
+    }
+}
+
+contract DerivedProtocol {
+    PriceOracle public oracle;
+    uint256 public lastSyncedPrice;
+    uint256 public depositBalance;
+
+    event PriceSynced(uint256 price);
+    event SubscriptionGasRefund(uint256 amount);
+
+    constructor(address _oracle) payable {
+        oracle = PriceOracle(_oracle);
+
+        // Subscribe to price updates
+        subscribe oracle.PriceUpdated(newPrice)
+            with onPriceUpdate(newPrice)
+            gasLimit 100000
+            gasPrice 20 gwei;
+
+        // Deposit gas payment
+        depositBalance = msg.value;
+    }
+
+    // Callback function - automatically called when PriceUpdated is emitted
+    function onPriceUpdate(uint256 newPrice)
+        external
+        payable
+        onlyEventCallback
+    {
+        lastSyncedPrice = newPrice;
+        emit PriceSynced(newPrice);
+
+        // Process gas refund if any
+        if (msg.value > 0) {
+            depositBalance += msg.value;
+            emit SubscriptionGasRefund(msg.value);
+        }
+
+        // Perform derivative calculations
+        // If this reverts, the oracle's updatePrice() still succeeds
+        rebalancePositions(newPrice);
+    }
+
+    function rebalancePositions(uint256 newPrice) internal {
+        // Complex logic that might fail
+        // Failures are graceful and logged
+    }
+
+    // Withdraw unused deposit
+    function withdrawDeposit(uint256 amount) external {
+        require(depositBalance >= amount, "Insufficient balance");
+        depositBalance -= amount;
+        payable(msg.sender).transfer(amount);
+    }
+}</code></pre>
+
+					<h3>Geth Implementation Sketch</h3>
+
+					<pre><code class="language-go">// core/vm/subscription_manager.go
+package vm
+
+type SubscriptionManager struct {
+    stateDB StateDB
+    subscriptions map[common.Hash]*Subscription
+    subscriptionsByEvent map[common.Hash][]*Subscription
+}
+
+func (sm *SubscriptionManager) Subscribe(
+    target common.Address,
+    eventSig common.Hash,
+    subscriber common.Address,
+    callback common.Address,
+    selector [4]byte,
+    gasLimit uint64,
+    gasPrice *big.Int,
+) (common.Hash, error) {
+    // Create subscription ID
+    subID := crypto.Keccak256Hash(
+        target.Bytes(),
+        eventSig.Bytes(),
+        subscriber.Bytes(),
+    )
+
+    // Create subscription record
+    sub := &Subscription{
+        ID:              subID,
+        TargetContract:  target,
+        EventSignature:  eventSig,
+        SubscriberContract: subscriber,
+        CallbackAddress: callback,
+        CallbackSelector: selector,
+        GasLimit:        gasLimit,
+        GasPrice:        gasPrice,
+        DepositBalance:  big.NewInt(0),
+        Active:          true,
+    }
+
+    // Store in state
+    sm.subscriptions[subID] = sub
+
+    // Index by event
+    eventKey := crypto.Keccak256Hash(target.Bytes(), eventSig.Bytes())
+    sm.subscriptionsByEvent[eventKey] = append(
+        sm.subscriptionsByEvent[eventKey],
+        sub,
+    )
+
+    // Persist to trie
+    sm.stateDB.SetSubscription(subID, sub)
+
+    return subID, nil
+}
+
+func (sm *SubscriptionManager) NotifySubscribers(
+    target common.Address,
+    eventSig common.Hash,
+    eventData []byte,
+) []*CallbackExecution {
+    eventKey := crypto.Keccak256Hash(target.Bytes(), eventSig.Bytes())
+    subscribers := sm.subscriptionsByEvent[eventKey]
+
+    callbacks := make([]*CallbackExecution, 0, len(subscribers))
+
+    for _, sub := range subscribers {
+        if !sub.Active {
+            continue
+        }
+
+        // Calculate gas cost
+        gasCost := new(big.Int).Mul(
+            new(big.Int).SetUint64(sub.GasLimit),
+            sub.GasPrice,
+        )
+
+        // Check deposit balance
+        if sub.DepositBalance.Cmp(gasCost) < 0 {
+            // Insufficient balance, skip
+            sm.stateDB.AddLog(&types.Log{
+                Address: sub.SubscriberContract,
+                Topics:  []common.Hash{
+                    InsufficientDepositEvent,
+                    sub.ID,
+                },
+            })
+            continue
+        }
+
+        // Deduct gas
+        sub.DepositBalance.Sub(sub.DepositBalance, gasCost)
+        sm.stateDB.SetSubscription(sub.ID, sub)
+
+        // Build callback data
+        callbackData := append(sub.CallbackSelector[:], eventData...)
+
+        // Create callback execution
+        callbacks = append(callbacks, &CallbackExecution{
+            SubscriptionID:     sub.ID,
+            SubscriberAddress:  sub.SubscriberContract,
+            CallbackAddress:    sub.CallbackAddress,
+            CallbackData:       callbackData,
+            GasLimit:           sub.GasLimit,
+            GasPrice:           sub.GasPrice,
+            OriginalOrigin:     common.Address{}, // Set by caller
+        })
+    }
+
+    return callbacks
+}</code></pre>
+				</section>
+
+				<section id="test-cases">
+					<h2>Test Cases</h2>
+
+					<h3>Test Case 1: Basic Subscription and Callback</h3>
+					<pre><code class="language-solidity">function testBasicSubscription() public {
+    // Deploy oracle
+    PriceOracle oracle = new PriceOracle();
+
+    // Deploy subscriber with gas deposit
+    DerivedProtocol subscriber = new DerivedProtocol{value: 1 ether}(
+        address(oracle)
+    );
+
+    // Verify subscription created
+    assertTrue(subscriber.isSubscribedTo(address(oracle), "PriceUpdated"));
+
+    // Emit event
+    oracle.updatePrice(1000);
+
+    // Verify callback executed
+    assertEq(subscriber.lastSyncedPrice(), 1000);
+}</code></pre>
+
+					<h3>Test Case 2: Callback Out of Gas</h3>
+					<pre><code class="language-solidity">function testCallbackOutOfGas() public {
+    // Create subscription with insufficient gas
+    DerivedProtocol subscriber = new DerivedProtocol{value: 1 ether}(
+        address(oracle)
+    );
+    subscriber.updateSubscription(address(oracle), "PriceUpdated", 10000, 20 gwei); // Too low
+
+    // Emit event
+    oracle.updatePrice(1000);
+
+    // Verify original transaction succeeded
+    assertEq(oracle.price(), 1000);
+
+    // Verify callback failed gracefully
+    assertEq(subscriber.lastSyncedPrice(), 0); // Not updated
+
+    // Verify failure was logged
+    // (check logs for CallbackFailed event)
+}</code></pre>
+
+					<h3>Test Case 3: Insufficient Deposit</h3>
+					<pre><code class="language-solidity">function testInsufficientDeposit() public {
+    DerivedProtocol subscriber = new DerivedProtocol{value: 0.001 ether}(
+        address(oracle)
+    );
+
+    // Emit events until deposit exhausted
+    for (uint i = 0; i < 100; i++) {
+        oracle.updatePrice(i);
+    }
+
+    // Verify early events succeeded
+    assertTrue(subscriber.lastSyncedPrice() > 0);
+
+    // Verify later events skipped due to insufficient deposit
+    assertLt(subscriber.lastSyncedPrice(), 99);
+}</code></pre>
+
+					<h3>Test Case 4: Multiple Subscribers</h3>
+					<pre><code class="language-solidity">function testMultipleSubscribers() public {
+    PriceOracle oracle = new PriceOracle();
+
+    DerivedProtocol sub1 = new DerivedProtocol{value: 1 ether}(address(oracle));
+    DerivedProtocol sub2 = new DerivedProtocol{value: 1 ether}(address(oracle));
+    DerivedProtocol sub3 = new DerivedProtocol{value: 1 ether}(address(oracle));
+
+    // Emit event
+    oracle.updatePrice(500);
+
+    // Verify all callbacks executed
+    assertEq(sub1.lastSyncedPrice(), 500);
+    assertEq(sub2.lastSyncedPrice(), 500);
+    assertEq(sub3.lastSyncedPrice(), 500);
+}</code></pre>
+
+					<h3>Test Case 5: Unsubscribe</h3>
+					<pre><code class="language-solidity">function testUnsubscribe() public {
+    DerivedProtocol subscriber = new DerivedProtocol{value: 1 ether}(
+        address(oracle)
+    );
+
+    // Verify subscribed
+    assertTrue(subscriber.isSubscribedTo(address(oracle), "PriceUpdated"));
+
+    // Unsubscribe
+    subscriber.cleanup(address(oracle));
+
+    // Verify unsubscribed
+    assertFalse(subscriber.isSubscribedTo(address(oracle), "PriceUpdated"));
+
+    // Emit event
+    oracle.updatePrice(1000);
+
+    // Verify callback not executed
+    assertEq(subscriber.lastSyncedPrice(), 0);
+}</code></pre>
+				</section>
+
+				<section id="copyright">
+					<h2>Copyright</h2>
+					<p>Copyright and related rights waived via <a href="../LICENSE.md">CC0</a>.</p>
+				</section>
+			</main>
+		</div>
+
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+	</body>
+</html>
