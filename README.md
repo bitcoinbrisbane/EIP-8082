@@ -1,7 +1,7 @@
-# EIP-8078
+# EIP-8082
 
 ---
-eip: 8078
+eip: 8082  
 title: Contract Event Subscription
 description: Allows contracts to subscribe to and react to events emitted by other contracts with gas-bounded execution
 author: Lucas Cullen (@bitcoinbrisbane) <lucas@bitcoinbrisbane.com.au>
@@ -10,7 +10,7 @@ status: Draft
 type: Standards Track
 category: Core
 created: 2025-11-15
-requires:
+requires:  NA
 ---
 
 ## Abstract
